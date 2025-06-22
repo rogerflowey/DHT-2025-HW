@@ -15,7 +15,7 @@ const (
 
 	lengthOfKeyValue int = 50
 
-	afterTestSleepTime = 30 * time.Second
+	afterTestSleepTime = 5 * time.Second
 
 	basicTestRoundNum               int     = 5   // 5 rounds in total.
 	basicTestNodeSize               int     = 100 // Nodes are numbered with 0 ~ 100 (101 nodes in total).
