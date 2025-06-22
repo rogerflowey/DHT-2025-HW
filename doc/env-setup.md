@@ -9,6 +9,9 @@
 
 本项目需要 Go 1.18 或以上版本。
 
+### 1.使用apt安装
+
+目前apt管理的安装的Go版本较老（1.18），如果需要安装新版请[手动安装](#2手动安装)。
 
 输入
 
@@ -30,26 +33,38 @@ go env -w GO111MODULE=on
 go env -w GOPROXY=https://goproxy.cn,direct
 ```
 
-### 备用方案:
+### 2.手动安装:
 
-删除旧版本 Go：
+删除旧版本 Go（如有）：
 
 ```bash
 sudo rm -rf /usr/local/go
 ```
 
+```bash
+sudo apt remove golang-go
+```
 
 下载 Go 安装包：（你可以从 [Go 官网](https://go.dev/dl/) 获取最新版本下载链接）
 
 ```bash
-curl -LO "https://go.dev/dl/go1.20.5.linux-amd64.tar.gz"
+curl -LO "https://go.dev/dl/go<version>.linux-amd64.tar.gz"
 ```
 
 解压到 `/usr/local` 目录：
 
 ```bash
-sudo tar -C /usr/local -xzf go1.20.5.linux-amd64.tar.gz
+sudo tar -C /usr/local -xzf go<version>.linux-amd64.tar.gz
 ```
+
+在[go.mod](../go.mod)中修改：
+
+```go
+- go 1.18
++ go <version>
+```
+
+其中`<version>`应该手动填入你需要的版本，如`1.20.5`。
 
 将 `/usr/local/go/bin` 目录添加到 PATH 环境变量中。
 
@@ -65,7 +80,13 @@ echo 'export PATH="$PATH:/usr/local/go/bin"' >> ~/.bashrc
 echo 'export PATH="$PATH:/usr/local/go/bin"' >> ~/.zshrc
 ```
 
-重启终端使环境变量生效。
+运行：
+
+```bash
+source ~/.bashrc
+```
+
+或者重启终端使环境变量生效。
 
 ## 配置 VSCode 开发环境
 
