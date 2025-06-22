@@ -55,11 +55,12 @@ func (node *Node) Init(addr string) {
 	node.peers = make(map[string]struct{})
 }
 
-func (node *Node) RunRPCServer() {
+func (node *Node) RunRPCServer(wg *sync.WaitGroup) {
 	node.server = rpc.NewServer()
 	node.server.Register(node)
 	var err error
 	node.listener, err = net.Listen("tcp", node.Addr)
+	wg.Done()
 	if err != nil {
 		logrus.Fatal("listen error: ", err)
 	}
@@ -171,9 +172,9 @@ func (node *Node) DeletePair(key string, _ *struct{}) error {
 // DHT methods
 //
 
-func (node *Node) Run() {
+func (node *Node) Run(wg *sync.WaitGroup) {
 	node.online = true
-	go node.RunRPCServer()
+	go node.RunRPCServer(wg)
 }
 
 func (node *Node) Create() {

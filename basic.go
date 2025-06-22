@@ -28,7 +28,7 @@ func basicTest() (bool, int, int) {
 		nodeAddresses[i] = portToAddr(localAddress, firstPort+i)
 
 		wg.Add(1)
-		go nodes[i].Run()
+		go nodes[i].Run(wg)
 	}
 
 	nodesInNetwork := make([]int, 0, basicTestNodeSize+1)

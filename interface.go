@@ -1,8 +1,10 @@
 package main
 
+import "sync"
+
 type dhtNode interface {
 	// "Run" is called after calling "NewNode". You can do some initialization works here.
-	Run()
+	Run(waitgroup *sync.WaitGroup)
 
 	// "Create" or "Join" will be called after calling "Run".
 	// For a dhtNode, either "Create" or "Join" will be called, but not both.
