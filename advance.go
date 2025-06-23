@@ -148,6 +148,7 @@ func quitAndStabilizeTest() (bool, int, int) {
 		wg.Add(1)
 		go nodes[i].Run(wg)
 	}
+	wg.Wait()
 	time.Sleep(QASAfterRunSleepTime)
 
 	/* Node 0 creates a new network. All notes join the network. */

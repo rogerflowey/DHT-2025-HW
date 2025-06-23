@@ -31,6 +31,8 @@ func basicTest() (bool, int, int) {
 		go nodes[i].Run(wg)
 	}
 
+	wg.Wait()
+
 	nodesInNetwork := make([]int, 0, basicTestNodeSize+1)
 
 	time.Sleep(basicTestAfterRunSleepTime)
