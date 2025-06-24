@@ -1,8 +1,8 @@
 package main
 
 import (
-	//"dht/naive"
 	"dht/chord"
+	"dht/naive"
 )
 
 /*
@@ -12,8 +12,8 @@ import (
  */
 
 func NewNode(port int) dhtNode {
-	// Todo: create a node and then return it.
-	node := new(chord.ChordNode)
+	node := &chord.ChordNode{}
+	node.MiniNode = &naive.MiniNode{}
 	node.Init(portToAddr(localAddress, port))
 	return node
 }

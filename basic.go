@@ -67,6 +67,8 @@ func basicTest() (bool, int, int) {
 		}
 		joinInfo.finish(&basicFailedCnt, &basicTotalCnt)
 
+		//printRingState(nodes[:], nodesInNetwork) // <-- ADD THIS
+
 		time.Sleep(basicTestAfterJoinQuitSleepTime)
 
 		/* Put, part 1. */
@@ -88,6 +90,7 @@ func basicTest() (bool, int, int) {
 			}
 		}
 		put1Info.finish(&basicFailedCnt, &basicTotalCnt)
+		//printRingState(nodes[:], nodesInNetwork)
 
 		/* Get, part 1. */
 		get1Info := testInfo{
@@ -111,6 +114,7 @@ func basicTest() (bool, int, int) {
 			}
 		}
 		get1Info.finish(&basicFailedCnt, &basicTotalCnt)
+		//printRingState(nodes[:], nodesInNetwork)
 
 		/* Delete, part 1. */
 		delete1Info := testInfo{
@@ -133,6 +137,7 @@ func basicTest() (bool, int, int) {
 			}
 		}
 		delete1Info.finish(&basicFailedCnt, &basicTotalCnt)
+		//printRingState(nodes[:], nodesInNetwork)
 
 		/* Quit. */
 		cyan.Printf("Start quitting (round %d)\n", t)
@@ -219,4 +224,23 @@ func basicTest() (bool, int, int) {
 	}
 
 	return panicked, basicFailedCnt, basicTotalCnt
+}
+
+// printRingState iterates through the live nodes and prints their debug state.
+func printRingState(nodes []dhtNode, nodesInNetwork []int) {
+	cyan.Println("====================================== Current Ring State ======================================")
+	// Sort the nodes by their index for consistent output, if desired.
+	// sort.Ints(nodesInNetwork) // Optional but nice for readability
+
+	for _, nodeIdx := range nodesInNetwork {
+		// Get the node from the interface slice.
+		dhtNode := nodes[nodeIdx]
+
+		// Call the method directly on the interface!
+		stateString := dhtNode.GetDebugState()
+
+		// Print the formatted string returned by the node.
+		fmt.Println(stateString)
+	}
+	cyan.Println("==============================================================================================")
 }

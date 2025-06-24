@@ -27,7 +27,7 @@ const (
 	basicTestMaxFailRate            float64 = 0.01
 	basicTestAfterRunSleepTime              = 200 * time.Millisecond
 	basicTestJoinQuitSleepTime              = time.Second
-	basicTestAfterJoinQuitSleepTime         = 10 * time.Second
+	basicTestAfterJoinQuitSleepTime         = 5 * time.Second
 
 	forceQuitNodeSize           int     = 50
 	forceQuitPutSize            int     = 500
