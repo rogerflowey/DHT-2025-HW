@@ -14,13 +14,13 @@ import (
 const (
 	FingerTableLength   = 32 // Length of the finger table
 	BackUpLength        = 12 // Number of backup nodes to maintain
-	ReplicaCount        = 8  // num of backup datas
-	ExpireDuration      = 10 * time.Second
-	StabilizeInterval   = 500 * time.Millisecond
-	FixFingerInterval   = 400 * time.Millisecond
-	CheckPredInterval   = 1 * time.Second
+	ReplicaCount        = 4  // num of backup datas
+	ExpireDuration      = 3 * time.Second
+	StabilizeInterval   = 200 * time.Millisecond
+	FixFingerInterval   = 200 * time.Millisecond
+	CheckPredInterval   = 500 * time.Millisecond
 	ReplicaInterval     = 1 * time.Second
-	ClearExpireInterval = 2 * time.Second
+	ClearExpireInterval = 1 * time.Second
 )
 
 func toID(addr string) uint32 {
@@ -29,9 +29,9 @@ func toID(addr string) uint32 {
 	return h.Sum32()
 }
 
-type dataWithTime struct {
-	value     string
-	timestamp time.Time
+type DataWithTime struct {
+	Value     string
+	Timestamp time.Time
 }
 
 type ChordNode struct {
@@ -43,30 +43,32 @@ type ChordNode struct {
 
 	mu sync.Mutex // protect the finger table and successor list
 
-	data     map[string]dataWithTime
+	data     map[string]DataWithTime
 	datalock sync.RWMutex // protect data consistency
 
 	shutdown chan struct{} // channel for stopping background task when shutting down
 
-	randGen *rand.Rand
+	randGen  *rand.Rand
+	isActive bool
 }
 
 func (node *ChordNode) Init(addr string) {
 	node.MiniNode.Init(addr)
 	node.ID = toID(addr) // Simple hash function to generate a unique ID based on the address
-	node.data = make(map[string]dataWithTime)
+	node.data = make(map[string]DataWithTime)
 	node.shutdown = make(chan struct{})
 
 	node.randGen = rand.New(rand.NewSource(time.Now().UnixNano()))
 }
 
 func (node *ChordNode) Run(wg *sync.WaitGroup) {
+	node.isActive = true
 	// Use a ticker for periodic tasks.
 	stabilizeTicker := time.NewTicker(StabilizeInterval)
 	fixFingerTicker := time.NewTicker(FixFingerInterval)
 	checkPredTicker := time.NewTicker(CheckPredInterval)
 	replicaTicker := time.NewTicker(ReplicaInterval)
-	ClearExpireTicker := time.NewTicker(ClearExpireInterval)
+	clearExpireTicker := time.NewTicker(ClearExpireInterval)
 	// Add your data replication tickers here too.
 
 	go func() {
@@ -120,16 +122,16 @@ func (node *ChordNode) Run(wg *sync.WaitGroup) {
 	go func() {
 		for {
 			select {
-			case <-ClearExpireTicker.C:
+			case <-clearExpireTicker.C:
 				node.ClearExpired()
 			case <-node.shutdown:
-				ClearExpireTicker.Stop()
+				clearExpireTicker.Stop()
 				return
 			}
 		}
 	}()
 
-	node.MiniNode.Run(wg)
+	node.MiniNode.Run(node, wg)
 }
 
 func (node *ChordNode) GetID(_ string, reply *uint32) error {
@@ -159,7 +161,7 @@ func (node *ChordNode) findPrimarySuccessor() (string, error) {
 	node.mu.Unlock()               // Unlock before making network calls
 
 	for i, addr := range listCopy {
-		if addr != "" && addr != node.Addr {
+		if addr != "" {
 			err := node.RemoteCall(addr, "ChordNode.Ping", "", nil)
 			if err == nil {
 				// Found a live successor
@@ -360,7 +362,7 @@ func (node *ChordNode) Join(existingAddr string) bool {
 	if err != nil || successorAddr == "" {
 		return false
 	}
-	var dataToStore map[string]dataWithTime
+	var dataToStore map[string]DataWithTime
 	err = node.RemoteCall(successorAddr, "ChordNode.RequestDataTransfer", node.ID, &dataToStore)
 	if err != nil {
 		return false
@@ -402,7 +404,7 @@ func (node *ChordNode) LocalGet(key string, reply *struct {
 		return nil
 	}
 	reply.Found = true
-	reply.Value = data.value
+	reply.Value = data.Value
 	return nil
 }
 
@@ -414,9 +416,9 @@ func (node *ChordNode) LocalPut(args []string, reply *bool) error {
 	key, value := args[0], args[1]
 	node.datalock.Lock()
 	defer node.datalock.Unlock()
-	node.data[key] = dataWithTime{
-		value:     value,
-		timestamp: time.Now(),
+	node.data[key] = DataWithTime{
+		Value:     value,
+		Timestamp: time.Now(),
 	}
 	*reply = true
 	return nil
@@ -583,7 +585,7 @@ func (node *ChordNode) NotifyReplica() {
 	for key, val := range node.data {
 		keyID := toID(key)
 		if isBetween(preID, myID, keyID) || keyID == myID {
-			primaryData[key] = val.value
+			primaryData[key] = val.Value
 		}
 	}
 	node.datalock.RUnlock()
@@ -609,7 +611,7 @@ func (node *ChordNode) ClearExpired() {
 		keyID := toID(key)
 		// If this node is not responsible for the key (not sourced)
 		if !(isBetween(preID, myID, keyID) || keyID == myID) {
-			if now.Sub(val.timestamp) > ExpireDuration {
+			if now.Sub(val.Timestamp) > ExpireDuration {
 				delete(node.data, key)
 			}
 		}
@@ -617,8 +619,8 @@ func (node *ChordNode) ClearExpired() {
 	node.datalock.Unlock()
 }
 
-func (node *ChordNode) RequestDataTransfer(newPredID uint32, reply *map[string]dataWithTime) error {
-	dataToTransfer := make(map[string]dataWithTime)
+func (node *ChordNode) RequestDataTransfer(newPredID uint32, reply *map[string]DataWithTime) error {
+	dataToTransfer := make(map[string]DataWithTime)
 	node.datalock.Lock()
 	defer node.datalock.Unlock()
 
@@ -638,6 +640,10 @@ func (node *ChordNode) RequestDataTransfer(newPredID uint32, reply *map[string]d
 }
 
 func (node *ChordNode) Quit() {
+	if !node.isActive {
+		return
+	}
+	node.isActive = false
 	// 1. Signal all background goroutines to stop.
 	// This prevents the node's state (successor, predecessor, etc.) from changing
 	// while we are trying to leave.
@@ -653,12 +659,13 @@ func (node *ChordNode) Quit() {
 
 	// Edge Case: If we are the only node in the ring, just shut down.
 	if mySucc == node.Addr || mySucc == "" {
-		fmt.Printf("Node %d is the only one in the ring, shutting down.\n", myID)
+		logrus.Infof("Node %d is the only one in the ring, shutting down.\n", myID)
+		node.MiniNode.Quit()
 		return
 	}
 
 	// 2. Transfer our primary data to our successor.
-	primaryData := make(map[string]dataWithTime)
+	primaryData := make(map[string]DataWithTime)
 	node.datalock.RLock()
 	for key, val := range node.data {
 		keyID := toID(key)
@@ -694,12 +701,12 @@ func (node *ChordNode) Quit() {
 
 // TakeOverData is called by a leaving node on its successor.
 // The successor takes this data and stores it as its own.
-func (node *ChordNode) TakeOverData(data map[string]dataWithTime, reply *bool) error {
+func (node *ChordNode) TakeOverData(data map[string]DataWithTime, reply *bool) error {
 	node.datalock.Lock()
 	defer node.datalock.Unlock()
 	for key, val := range data {
 		// Store the data, updating the timestamp.
-		node.data[key] = dataWithTime{value: val.value, timestamp: time.Now()}
+		node.data[key] = DataWithTime{Value: val.Value, Timestamp: time.Now()}
 	}
 	*reply = true
 	return nil
@@ -726,7 +733,79 @@ func (node *ChordNode) UpdateSuccessor(newSuccAddr string, reply *bool) error {
 }
 
 func (node *ChordNode) ForceQuit() {
+	if !node.isActive {
+		return
+	}
+	node.isActive = false
 	// Stop background goroutines and shut down immediately, no remote cleanup.
 	close(node.shutdown)
 	node.MiniNode.ForceQuit()
+}
+
+//Debug only part
+
+type DebugState struct {
+	ID            uint32
+	Addr          string
+	Predecessor   string
+	SuccessorList [BackUpLength]string
+	// We can add the finger table later if needed.
+}
+
+// Add this new RPC method to your ChordNode.
+func (node *ChordNode) GetState(_ string, reply *DebugState) error {
+	node.mu.Lock()
+	defer node.mu.Unlock()
+
+	reply.ID = node.ID
+	reply.Addr = node.Addr
+	reply.Predecessor = node.predecessor
+	reply.SuccessorList = node.successorList
+
+	return nil
+}
+
+// In file: chord/chord.go
+
+// GetDebugState returns a formatted string of the node's essential state for debugging.
+// This method satisfies the dhtNode interface.
+func (node *ChordNode) GetDebugState() string {
+	// Lock the mutex to safely read the predecessor and successor list.
+	node.mu.Lock()
+	defer node.mu.Unlock()
+
+	// --- Safely get the predecessor's ID ---
+	var predIDStr string
+	if node.predecessor == "" {
+		predIDStr = "nil"
+	} else {
+		predIDStr = fmt.Sprintf("%d", toID(node.predecessor))
+	}
+
+	// --- Safely get the primary successor's ID ---
+	var succIDStr string
+	// Find the first non-empty successor in the list for robustness.
+	primarySuccessor := ""
+	for _, s := range node.successorList {
+		if s != "" {
+			primarySuccessor = s
+			break
+		}
+	}
+
+	if primarySuccessor == "" {
+		succIDStr = "nil"
+	} else {
+		succIDStr = fmt.Sprintf("%d", toID(primarySuccessor))
+	}
+
+	// --- Format the final output string ---
+	// Using padding like %-10s makes the output align nicely in columns.
+	return fmt.Sprintf(
+		"Node %-10d | Addr: %-21s | Pred: %-10s | Succ: %-10s",
+		node.ID,
+		node.Addr,
+		predIDStr,
+		succIDStr,
+	)
 }

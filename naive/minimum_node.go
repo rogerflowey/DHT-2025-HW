@@ -28,11 +28,18 @@ func (node *MiniNode) Init(addr string) {
 	node.Addr = addr
 }
 
-func (node *MiniNode) RunRPCServer(wg *sync.WaitGroup) {
+// RunRPCServer now takes an argument: the object whose methods should be exposed via RPC.
+func (node *MiniNode) RunRPCServer(rcvr interface{}, wg *sync.WaitGroup) {
 	node.server = rpc.NewServer()
-	node.server.Register(node)
 
-	var err error
+	// THE KEY CHANGE:
+	// Instead of registering `node` (the MiniNode), we register the `rcvr` object passed to us.
+	// This will automatically find and register all valid public methods on the receiver.
+	err := node.server.Register(rcvr)
+	if err != nil {
+		logrus.Fatalf("[%s] Failed to register RPC receiver: %v", node.Addr, err)
+	}
+
 	node.listener, err = net.Listen("tcp", node.Addr)
 	wg.Done()
 	if err != nil {
@@ -49,6 +56,12 @@ func (node *MiniNode) RunRPCServer(wg *sync.WaitGroup) {
 		}
 		go node.server.ServeConn(conn)
 	}
+}
+
+// The Run method also needs to be updated to pass the receiver.
+func (node *MiniNode) Run(rcvr interface{}, wg *sync.WaitGroup) {
+	node.online = true
+	go node.RunRPCServer(rcvr, wg)
 }
 
 func (node *MiniNode) StopRPCServer() {
@@ -87,11 +100,6 @@ func (node *MiniNode) RemoteCall(addr string, method string, args interface{}, r
 // Ping is a basic RPC method to check if a node is alive.
 func (node *MiniNode) Ping(_ string, _ *struct{}) error {
 	return nil
-}
-
-func (node *MiniNode) Run(wg *sync.WaitGroup) {
-	node.online = true
-	go node.RunRPCServer(wg)
 }
 
 func (node *MiniNode) Create() {
