@@ -79,7 +79,7 @@ func (node *MiniNode) RemoteCall(addr string, method string, args interface{}, r
 		logrus.Infof("[%s] RemoteCall -> %s method %s with args %v", node.Addr, addr, method, args)
 	}
 
-	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+	conn, err := net.DialTimeout("tcp", addr, 1*time.Second)
 	if err != nil {
 		logrus.Errorf("[%s] Dialing %s error: %v", node.Addr, addr, err)
 		return err

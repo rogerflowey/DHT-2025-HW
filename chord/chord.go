@@ -725,8 +725,6 @@ func (node *ChordNode) UpdatePredecessor(newPredAddr string, reply *bool) error 
 func (node *ChordNode) UpdateSuccessor(newSuccAddr string, reply *bool) error {
 	node.mu.Lock()
 	defer node.mu.Unlock()
-	// This is a simplified update. A more robust version might also
-	// trigger a stabilize call to update the full successor list.
 	node.successorList[0] = newSuccAddr
 	*reply = true
 	return nil

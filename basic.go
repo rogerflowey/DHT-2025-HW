@@ -67,7 +67,7 @@ func basicTest() (bool, int, int) {
 		}
 		joinInfo.finish(&basicFailedCnt, &basicTotalCnt)
 
-		//printRingState(nodes[:], nodesInNetwork) // <-- ADD THIS
+		printRingState(nodes[:], nodesInNetwork) // <-- ADD THIS
 
 		time.Sleep(basicTestAfterJoinQuitSleepTime)
 

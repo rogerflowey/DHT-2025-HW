@@ -1,7 +1,7 @@
 package main
 
 import (
-	"dht/chord"
+	"dht/kademlia"
 	"dht/naive"
 )
 
@@ -12,7 +12,7 @@ import (
  */
 
 func NewNode(port int) dhtNode {
-	node := &chord.ChordNode{}
+	node := &kademlia.KadeNode{}
 	node.MiniNode = &naive.MiniNode{}
 	node.Init(portToAddr(localAddress, port))
 	return node
