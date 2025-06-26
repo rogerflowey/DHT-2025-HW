@@ -164,6 +164,7 @@ func quitAndStabilizeTest() (bool, int, int) {
 		addr := nodeAddresses[rand.Intn(i)]
 		if !nodes[i].Join(addr) {
 			joinInfo.fail()
+			fmt.Printf("[Join Fail] addr=%q", addr)
 		} else {
 			joinInfo.success()
 		}
@@ -189,6 +190,7 @@ func quitAndStabilizeTest() (bool, int, int) {
 
 		if !nodes[rand.Intn(QASNodeSize+1)].Put(key, value) {
 			putInfo.fail()
+			fmt.Printf("[Put Fail] key=%q expected=%q\n", key, value)
 		} else {
 			putInfo.success()
 		}
@@ -206,6 +208,7 @@ func quitAndStabilizeTest() (bool, int, int) {
 		idxInArray := rand.Intn(len(nodesInNetwork))
 
 		nodes[nodesInNetwork[idxInArray]].Quit()
+
 		nodesInNetwork = removeFromArray(nodesInNetwork, idxInArray)
 
 		time.Sleep(QASQuitSleepTime)
@@ -216,6 +219,7 @@ func quitAndStabilizeTest() (bool, int, int) {
 			ok, res := nodes[nodesInNetwork[rand.Intn(len(nodesInNetwork))]].Get(key)
 			if !ok || res != value {
 				getInfo.fail()
+				fmt.Printf("[Get Fail] key=%q expected=%q got=%q ok=%v\n", key, value, res, ok)
 			} else {
 				getInfo.success()
 			}

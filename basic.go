@@ -67,7 +67,7 @@ func basicTest() (bool, int, int) {
 		}
 		joinInfo.finish(&basicFailedCnt, &basicTotalCnt)
 
-		printRingState(nodes[:], nodesInNetwork) // <-- ADD THIS
+		//printRingState(nodes[:], nodesInNetwork) // <-- ADD THIS
 
 		time.Sleep(basicTestAfterJoinQuitSleepTime)
 
@@ -85,6 +85,7 @@ func basicTest() (bool, int, int) {
 
 			if !nodes[nodesInNetwork[rand.Intn(len(nodesInNetwork))]].Put(key, value) {
 				put1Info.fail()
+				fmt.Printf("[Put Fail] key=%q\n", key)
 			} else {
 				put1Info.success()
 			}
@@ -104,6 +105,7 @@ func basicTest() (bool, int, int) {
 			ok, res := nodes[nodesInNetwork[rand.Intn(len(nodesInNetwork))]].Get(key)
 			if !ok || res != value {
 				get1Info.fail()
+				fmt.Printf("[Get Fail] key=%q expected=%q got=%q ok=%v\n", key, value, res, ok)
 			} else {
 				get1Info.success()
 			}
@@ -129,6 +131,7 @@ func basicTest() (bool, int, int) {
 				success := nodes[nodesInNetwork[rand.Intn(len(nodesInNetwork))]].Delete(key)
 				if !success {
 					delete1Info.fail()
+					fmt.Printf("[Delete Fail] key=%q\n", key)
 				} else {
 					delete1Info.success()
 				}
@@ -166,6 +169,7 @@ func basicTest() (bool, int, int) {
 
 			if !nodes[nodesInNetwork[rand.Intn(len(nodesInNetwork))]].Put(key, value) {
 				put2Info.fail()
+				fmt.Printf("[Put Fail] key=%q\n", key)
 			} else {
 				put2Info.success()
 			}
@@ -184,6 +188,7 @@ func basicTest() (bool, int, int) {
 			ok, res := nodes[nodesInNetwork[rand.Intn(len(nodesInNetwork))]].Get(key)
 			if !ok || res != value {
 				get2Info.fail()
+				fmt.Printf("[Get Fail] key=%q expected=%q got=%q ok=%v\n", key, value, res, ok)
 			} else {
 				get2Info.success()
 			}
@@ -208,6 +213,7 @@ func basicTest() (bool, int, int) {
 				success := nodes[nodesInNetwork[rand.Intn(len(nodesInNetwork))]].Delete(key)
 				if !success {
 					delete2Info.fail()
+					fmt.Printf("[Delete Fail] key=%q\n", key)
 				} else {
 					delete2Info.success()
 				}
