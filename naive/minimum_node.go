@@ -1,9 +1,13 @@
 package naive
 
 import (
+	"errors"
+	"fmt"
+	"io"
 	"net"
 	"net/rpc"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,10 +26,14 @@ type MiniNode struct {
 
 	listener net.Listener
 	server   *rpc.Server
+
+	poolMutex  sync.RWMutex
+	clientPool map[string]*rpc.Client
 }
 
 func (node *MiniNode) Init(addr string) {
 	node.Addr = addr
+	node.clientPool = make(map[string]*rpc.Client)
 }
 
 // RunRPCServer now takes an argument: the object whose methods should be exposed via RPC.
@@ -74,27 +82,118 @@ func (node *MiniNode) StopRPCServer() {
 	}
 }
 
+var (
+	ErrNetwork     = errors.New("network error")
+	ErrApplication = errors.New("application error")
+)
+
+// getClient retrieves a client from the pool or creates a new one.
+// This is the core of the connection pooling logic.
+func (node *MiniNode) getClient(addr string) (*rpc.Client, error) {
+	// First, try with a read lock for high concurrency.
+	node.poolMutex.RLock()
+	client, ok := node.clientPool[addr]
+	node.poolMutex.RUnlock()
+
+	if ok && client != nil {
+		return client, nil // Found an existing client, reuse it.
+	}
+
+	// If no client was found, we need a write lock to create one.
+	node.poolMutex.Lock()
+	defer node.poolMutex.Unlock()
+
+	// It's possible another goroutine created the client while we were waiting for the lock.
+	// This is the "double-checked locking" pattern.
+	client, ok = node.clientPool[addr]
+	if ok && client != nil {
+		return client, nil
+	}
+
+	// Create a new connection.
+	conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+	if err != nil {
+		logrus.Errorf("[%s] Dialing %s error: %v", node.Addr, addr, err)
+		return nil, fmt.Errorf("%w: failed to dial %s: %v", ErrNetwork, addr, err)
+	}
+
+	// Create a new RPC client and store it in the pool.
+	client = rpc.NewClient(conn)
+	node.clientPool[addr] = client
+
+	logrus.Infof("[%s] Created new pooled connection to %s", node.Addr, addr)
+	return client, nil
+}
+
+// removeClient closes and removes a dead client from the pool.
+func (node *MiniNode) removeClient(addr string) {
+	node.poolMutex.Lock()
+	defer node.poolMutex.Unlock()
+
+	client, ok := node.clientPool[addr]
+	if ok && client != nil {
+		client.Close() // Close the underlying connection.
+		delete(node.clientPool, addr)
+		logrus.Warnf("[%s] Removed dead client for %s from pool", node.Addr, addr)
+	}
+}
+
+// RemoteCall uses the connection pool to make an RPC call.
 func (node *MiniNode) RemoteCall(addr string, method string, args interface{}, reply interface{}) error {
 	if method != "MiniNode.Ping" {
 		logrus.Infof("[%s] RemoteCall -> %s method %s with args %v", node.Addr, addr, method, args)
 	}
 
-	conn, err := net.DialTimeout("tcp", addr, 1*time.Second)
+	// Get a client from our pool.
+	client, err := node.getClient(addr)
 	if err != nil {
-		logrus.Errorf("[%s] Dialing %s error: %v", node.Addr, addr, err)
+		// Error is already logged in getClient, just return it.
 		return err
 	}
-	defer conn.Close()
 
-	client := rpc.NewClient(conn)
-	defer client.Close()
-
+	// Make the RPC call using the pooled client.
 	err = client.Call(method, args, reply)
 	if err != nil {
 		logrus.Errorf("[%s] RemoteCall to %s method %s error: %v", node.Addr, addr, method, err)
-		return err
+		// If the error is rpc.ErrShutdown, it means the connection is closed/broken.
+		// We should remove this dead client from our pool.
+		// Handle network-related errors that indicate a broken connection.
+		if err == rpc.ErrShutdown ||
+			err == io.EOF ||
+			err == io.ErrUnexpectedEOF ||
+			strings.Contains(err.Error(), "connection reset") ||
+			strings.Contains(err.Error(), "broken pipe") ||
+			strings.Contains(err.Error(), "use of closed network connection") {
+			node.removeClient(addr)
+			return fmt.Errorf("%w: connection error: %v", ErrNetwork, err)
+		}
+
+		if strings.Contains(err.Error(), "application error") {
+			return fmt.Errorf("%w: remote handler returned error: %v", ErrApplication, err)
+		}
+		node.removeClient(addr)
+		return fmt.Errorf("%w: connection error: %v", ErrNetwork, err)
+	}
+
+	if method != "MiniNode.Ping" {
+		logrus.Infof("[%s] RemoteCall result from %s method %s: reply=%+v", node.Addr, addr, method, reply)
 	}
 	return nil
+}
+
+// Shutdown closes all active client connections in the pool.
+func (node *MiniNode) Shutdown() {
+	node.poolMutex.Lock()
+	defer node.poolMutex.Unlock()
+
+	logrus.Infof("[%s] Shutting down and closing all pooled connections...", node.Addr)
+	for addr, client := range node.clientPool {
+		if client != nil {
+			client.Close()
+		}
+		delete(node.clientPool, addr)
+	}
+	logrus.Infof("[%s] All pooled connections closed.", node.Addr)
 }
 
 // Ping is a basic RPC method to check if a node is alive.
