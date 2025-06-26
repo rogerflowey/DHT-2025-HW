@@ -107,6 +107,7 @@ func forceQuitTest() (bool, int, int) {
 			ok, res := nodes[nodesInNetwork[rand.Intn(len(nodesInNetwork))]].Get(key)
 			if !ok || res != value {
 				getInfo.fail()
+				fmt.Printf("[Get Fail] key=%q expected=%q got=%q ok=%v\n", key, value, res, ok)
 			} else {
 				getInfo.success()
 			}
