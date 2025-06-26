@@ -29,11 +29,15 @@ type MiniNode struct {
 
 	poolMutex  sync.RWMutex
 	clientPool map[string]*rpc.Client
+
+	activeConnMutex sync.Mutex
+	activeConns     map[net.Conn]struct{}
 }
 
 func (node *MiniNode) Init(addr string) {
 	node.Addr = addr
 	node.clientPool = make(map[string]*rpc.Client)
+	node.activeConns = make(map[net.Conn]struct{})
 }
 
 // RunRPCServer now takes an argument: the object whose methods should be exposed via RPC.
@@ -62,7 +66,21 @@ func (node *MiniNode) RunRPCServer(rcvr interface{}, wg *sync.WaitGroup) {
 			}
 			return
 		}
-		go node.server.ServeConn(conn)
+
+		node.activeConnMutex.Lock()
+		node.activeConns[conn] = struct{}{}
+		node.activeConnMutex.Unlock()
+
+		go func(c net.Conn) {
+			// --- THE FIX: When ServeConn finishes, untrack the connection ---
+			defer func() {
+				node.activeConnMutex.Lock()
+				delete(node.activeConns, c)
+				node.activeConnMutex.Unlock()
+				c.Close() // Ensure it's closed
+			}()
+			node.server.ServeConn(c)
+		}(conn)
 	}
 }
 
@@ -79,6 +97,16 @@ func (node *MiniNode) StopRPCServer() {
 	node.online = false
 	if node.listener != nil {
 		node.listener.Close()
+	}
+
+	node.activeConnMutex.Lock()
+	defer node.activeConnMutex.Unlock()
+
+	logrus.Warnf("[%s] Shutting down. Closing %d active server connections.", node.Addr, len(node.activeConns))
+	for conn := range node.activeConns {
+		// This will cause the corresponding ServeConn goroutine to get an
+		// error and exit.
+		conn.Close()
 	}
 }
 
@@ -163,12 +191,13 @@ func (node *MiniNode) RemoteCall(addr string, method string, args interface{}, r
 			err == io.ErrUnexpectedEOF ||
 			strings.Contains(err.Error(), "connection reset") ||
 			strings.Contains(err.Error(), "broken pipe") ||
-			strings.Contains(err.Error(), "use of closed network connection") {
+			strings.Contains(err.Error(), "use of closed network connection") ||
+			strings.Contains(err.Error(), "connection refused") {
 			node.removeClient(addr)
 			return fmt.Errorf("%w: connection error: %v", ErrNetwork, err)
 		}
 
-		if strings.Contains(err.Error(), "application error") {
+		if errors.Is(err, ErrApplication) {
 			return fmt.Errorf("%w: remote handler returned error: %v", ErrApplication, err)
 		}
 		node.removeClient(addr)

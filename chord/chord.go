@@ -162,7 +162,7 @@ func (node *ChordNode) findPrimarySuccessor() (string, error) {
 
 	for i, addr := range listCopy {
 		if addr != "" {
-			err := node.RemoteCall(addr, "ChordNode.Ping", "", nil)
+			err := node.RemoteCall(addr, "ChordNode.Ping", "", new(struct{}))
 			if err == nil {
 				// Found a live successor
 				return addr, nil
@@ -172,6 +172,7 @@ func (node *ChordNode) findPrimarySuccessor() (string, error) {
 				// Check if the entry is still the same one we failed to ping
 				if node.successorList[i] == addr {
 					node.successorList[i] = ""
+
 				}
 				node.mu.Unlock()
 			}
@@ -188,32 +189,43 @@ func isBetween(id1, id2, id uint32) bool {
 	return id1 < id || id <= id2
 }
 
-// FindSuccessor finds the first node that succeeds the target_id.
 func (node *ChordNode) FindSuccessor(target_id uint32, reply *string) error {
 	successorAddr, err := node.findPrimarySuccessor()
 	if err != nil {
-		// If we have no successor, we might be the only node.
-		// In a single-node ring, we are our own successor.
 		*reply = node.Addr
 		return nil
 	}
 
 	successorID := toID(successorAddr)
-	// BASE CASE: If the target is between this node and its successor,
-	// then the successor is the answer.
 	if isBetween(node.ID, successorID, target_id) {
 		*reply = successorAddr
 		return nil
 	}
 
-	// RECURSIVE STEP: Search the finger table for the best node to forward to.
 	nextHop, err := node.closestFinger(target_id)
 	if err != nil {
 		return fmt.Errorf("fail to find closestPrecedingFinger")
 	}
 
-	// Forward the request to the chosen next hop.
-	return node.RemoteCall(nextHop, "ChordNode.FindSuccessor", target_id, reply)
+	if nextHop == node.Addr {
+		*reply = node.Addr
+		return nil
+	}
+
+	var remoteReply string
+	err = node.RemoteCall(nextHop, "ChordNode.FindSuccessor", target_id, &remoteReply)
+	if err != nil {
+		node.mu.Lock()
+		for i := range node.fingerTable {
+			if node.fingerTable[i] == nextHop {
+				node.fingerTable[i] = ""
+			}
+		}
+		node.mu.Unlock()
+		return fmt.Errorf("remote call to %s failed: %w", nextHop, err)
+	}
+	*reply = remoteReply
+	return nil
 }
 
 func (node *ChordNode) closestFinger(target_id uint32) (string, error) {
@@ -231,7 +243,7 @@ func (node *ChordNode) closestFinger(target_id uint32) (string, error) {
 
 		if isBetween(node.ID, target_id, fingerID) {
 			// Ping to make sure it's alive before using it.
-			err := node.RemoteCall(fingerAddr, "ChordNode.Ping", "", nil)
+			err := node.RemoteCall(fingerAddr, "ChordNode.Ping", "", new(struct{}))
 			if err == nil {
 				return fingerAddr, nil // Found a live, valid finger.
 			} else {
@@ -324,7 +336,7 @@ func (node *ChordNode) CheckPredecessor() {
 		return
 	}
 
-	err := node.RemoteCall(pred, "ChordNode.Ping", "", nil)
+	err := node.RemoteCall(pred, "ChordNode.Ping", "", new(struct{}))
 	if err != nil {
 		node.mu.Lock()
 		if node.predecessor == pred {
@@ -415,12 +427,37 @@ func (node *ChordNode) LocalPut(args []string, reply *bool) error {
 	}
 	key, value := args[0], args[1]
 	node.datalock.Lock()
-	defer node.datalock.Unlock()
+	_, existed := node.data[key]
 	node.data[key] = DataWithTime{
 		Value:     value,
 		Timestamp: time.Now(),
 	}
+	node.datalock.Unlock()
 	*reply = true
+
+	// If this node is the source (primary owner) for the key, replicate to successors.
+	node.mu.Lock()
+	preID := toID(node.predecessor)
+	myID := node.ID
+	succs := make([]string, 0, ReplicaCount)
+	for _, addr := range node.successorList {
+		if addr != "" && addr != node.Addr {
+			succs = append(succs, addr)
+			if len(succs) >= ReplicaCount-1 {
+				break
+			}
+		}
+	}
+	node.mu.Unlock()
+
+	keyID := toID(key)
+	// Only replicate if this node is the source and this is a new key or an update
+	if !existed && (isBetween(preID, myID, keyID) || keyID == myID) {
+		for _, succ := range succs {
+			go node.RemoteCall(succ, "ChordNode.LocalPut", []string{key, value}, new(bool))
+		}
+	}
+
 	return nil
 }
 
@@ -696,6 +733,7 @@ func (node *ChordNode) Quit() {
 	node.RemoteCall(myPred, "ChordNode.UpdateSuccessor", mySucc, new(bool))
 
 	logrus.Infof("Node %d has gracefully left the ring.\n", myID)
+	node.MiniNode.Shutdown()
 	node.MiniNode.Quit()
 }
 

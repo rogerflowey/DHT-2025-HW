@@ -179,7 +179,7 @@ func (node *KadeNode) RemoteCall(addr string, method string, args interface{}, r
 		node.removeContact(addr)
 	} else {
 		go func() {
-			err := node.MiniNode.RemoteCall(addr, "KadeNode.NotifyUpdate", node.Addr, nil)
+			err := node.MiniNode.RemoteCall(addr, "KadeNode.NotifyUpdate", node.Addr, new(struct{}))
 			if err == nil {
 				node.updateContact(addr)
 			}
@@ -397,7 +397,7 @@ func (node *KadeNode) Create() {
 }
 
 func (node *KadeNode) Join(addr string) bool {
-	err := node.RemoteCall(addr, "KadeNode.Ping", "", nil)
+	err := node.RemoteCall(addr, "KadeNode.Ping", "", new(struct{}))
 	if err != nil {
 		return false
 	}
@@ -808,8 +808,8 @@ func (node *KadeNode) Quit() {
 			wg.Add(1)
 			go func(target string, introducee string) {
 				defer wg.Done()
-				node.MiniNode.RemoteCall(target, "KadeNode.NotifyUpdate", introducee, nil)
-				node.MiniNode.RemoteCall(introducee, "KadeNode.NotifyUpdate", target, nil)
+				node.MiniNode.RemoteCall(target, "KadeNode.NotifyUpdate", introducee, new(struct{}))
+				node.MiniNode.RemoteCall(introducee, "KadeNode.NotifyUpdate", target, new(struct{}))
 			}(first, second)
 		}
 		wg.Wait()
@@ -838,7 +838,7 @@ func (node *KadeNode) Quit() {
 		wg.Add(1)
 		go func(peerAddr string) {
 			defer wg.Done()
-			node.RemoteCall(peerAddr, "KadeNode.NotifyLeave", node.Addr, nil)
+			node.RemoteCall(peerAddr, "KadeNode.NotifyLeave", node.Addr, new(struct{}))
 		}(addr)
 	}
 	wg.Wait() // Wait for all notifications to be sent.
