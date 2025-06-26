@@ -2,6 +2,8 @@ package kademlia
 
 import (
 	"dht/naive"
+	"errors"
+	"fmt"
 	"hash/fnv"
 	"math/bits"
 	"math/rand"
@@ -10,15 +12,17 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
 const (
 	digitLength          = 32
-	k_Size               = 4
-	trySize              = 2
-	republishInterval    = 3 * time.Second
-	bucketUpdateInterval = 7 * time.Second
-	dataStaleAfter       = 10 * time.Second
+	k_Size               = 8
+	trySize              = 4
+	republishInterval    = 4 * time.Second
+	bucketUpdateInterval = 4 * time.Second
+	dataStaleAfter       = 20 * time.Second
 )
 
 func toID(addr string) uint32 {
@@ -29,9 +33,12 @@ func toID(addr string) uint32 {
 
 type KadeNode struct {
 	*naive.MiniNode
-	ID              uint32
-	k_Bucket        [digitLength][k_Size]string
-	BucktUpdateTime [digitLength]time.Time
+	ID               uint32
+	k_Bucket         [digitLength][k_Size]string
+	BucketUpdateTime [digitLength]time.Time
+
+	blacklist   map[string]time.Time
+	blacklistMu sync.RWMutex
 
 	mu sync.Mutex // protect internal structure
 
@@ -66,11 +73,10 @@ func (node *KadeNode) Init(addr string) {
 	node.MiniNode.Init(addr)
 	node.ID = toID(addr)
 	node.data = make(map[string]StoredData)
+	node.blacklist = make(map[string]time.Time)
 	node.shutdown = make(chan struct{})
 	node.randGen = rand.New(rand.NewSource(time.Now().UnixNano()))
 
-	// Example of how you would start the background task
-	// go node.backgroundRepublisher()
 }
 
 func (node *KadeNode) GetID(_ string, reply *uint32) error {
@@ -108,19 +114,58 @@ func (node *KadeNode) updateContact(addr string) {
 			barrel[0] = addrVal
 		}
 	} else {
-		// Not found, insert at front, evict if full
-		if barrel[len(barrel)-1] != "" {
-			//Todo: Try to ping
-			//Not done since this requires release lock and recheck, which significantly increase complexity
-		}
 		copy(barrel[1:], barrel[:len(barrel)-1])
 		barrel[0] = addr
 	}
-	node.BucktUpdateTime[bucketIndex] = time.Now()
+	node.BucketUpdateTime[bucketIndex] = time.Now()
+}
+
+// removeContact removes a dead node from the appropriate k-bucket.
+func (node *KadeNode) removeContact(addr string) {
+	if addr == "" {
+		return
+	}
+	contactID := toID(addr)
+	dis := contactID ^ node.ID
+	if dis == 0 {
+		return
+	}
+	bucketIndex := bits.Len32(dis) - 1
+
+	node.mu.Lock()
+	defer node.mu.Unlock()
+
+	barrel := node.k_Bucket[bucketIndex][:]
+	var idx = -1
+	for i, v := range barrel {
+		if v == addr {
+			idx = i
+			break
+		}
+	}
+
+	if idx != -1 {
+		// Found the dead contact. Remove it by shifting all subsequent
+		// elements to the left and placing an empty string at the end.
+		copy(barrel[idx:], barrel[idx+1:])
+		barrel[len(barrel)-1] = ""
+		logrus.Infof("[%s] Pruned dead contact %s from bucket %d\n", node.Addr, addr, bucketIndex)
+	}
 }
 
 func (node *KadeNode) NotifyUpdate(addr string, reply *struct{}) error {
+	if !node.isActive {
+		return naive.ErrNetwork
+	}
 	node.updateContact(addr)
+	return nil
+}
+func (node *KadeNode) NotifyLeave(addr string, reply *struct{}) error {
+	if !node.isActive {
+		return naive.ErrNetwork
+	}
+	logrus.Infof("[%s] Received leave notification from %s. Pruning contact.", node.Addr, addr)
+	node.removeContact(addr)
 	return nil
 }
 
@@ -130,18 +175,23 @@ func (node *KadeNode) RemoteCall(addr string, method string, args interface{}, r
 
 	//try update bothside
 	//the re-call is only to ensure strict correctness(and not changing every RPC function)
-	if err == nil {
-		update_err := node.MiniNode.RemoteCall(addr, "KadeNode.NotifyUpdate", node.Addr, nil)
-		if update_err == nil {
-			node.updateContact(addr)
-		}
+	if err != nil {
+		node.removeContact(addr)
+	} else {
+		go func() {
+			err := node.MiniNode.RemoteCall(addr, "KadeNode.NotifyUpdate", node.Addr, nil)
+			if err == nil {
+				node.updateContact(addr)
+			}
+		}()
 	}
 
 	return err
 }
 
-// revised by AI for comment, and fix the len(fixed_array) bug
-func (node *KadeNode) AskForID(target_id uint32, reply *[k_Size]string) error {
+// askForIDInternal returns up to k_Size closest known contacts to the target_id.
+// This is the internal logic, not exposed as an RPC.
+func (node *KadeNode) askForIDInternal(target_id uint32, reply *[k_Size]string) {
 	dis := target_id ^ node.ID
 	bucketIndex := 0
 	if dis > 0 {
@@ -177,7 +227,7 @@ func (node *KadeNode) AskForID(target_id uint32, reply *[k_Size]string) error {
 	}
 	// If we found k contacts from the ideal bucket, we are done.
 	if count == k_Size {
-		return nil
+		return
 	}
 
 	// else, we collect all known contacts and sort
@@ -210,9 +260,30 @@ func (node *KadeNode) AskForID(target_id uint32, reply *[k_Size]string) error {
 	for i := 0; i < k_Size && i < len(allContacts); i++ {
 		reply[i] = allContacts[i].addr
 	}
+}
 
+// AskForID is the RPC interface for returning up to k_Size closest known contacts to the target_id.
+func (node *KadeNode) AskForID(target_id uint32, reply *[k_Size]string) error {
+	if !node.isActive {
+		return naive.ErrNetwork
+	}
+	node.askForIDInternal(target_id, reply)
 	return nil
 }
+
+func (node *KadeNode) addToBlacklist(addr string) {
+	node.blacklistMu.Lock()
+	defer node.blacklistMu.Unlock()
+	node.blacklist[addr] = time.Now().Add(2 * time.Second)
+}
+
+func (node *KadeNode) isBlacklisted(addr string) bool {
+	node.blacklistMu.RLock()
+	defer node.blacklistMu.RUnlock()
+	expiryTime, ok := node.blacklist[addr]
+	return ok && time.Now().Before(expiryTime)
+}
+
 func (node *KadeNode) NodeLookup(target_id uint32) [k_Size]string {
 	type candidate struct {
 		addr    string
@@ -223,7 +294,7 @@ func (node *KadeNode) NodeLookup(target_id uint32) [k_Size]string {
 
 	// first add result of local ask
 	var reply [k_Size]string
-	node.AskForID(target_id, &reply)
+	node.askForIDInternal(target_id, &reply)
 	for i, addrResult := range reply {
 		if addrResult != "" {
 			known[i] = candidate{addrResult, false}
@@ -243,6 +314,9 @@ func (node *KadeNode) NodeLookup(target_id uint32) [k_Size]string {
 			if known[i].queried {
 				continue
 			}
+			if node.isBlacklisted(known[i].addr) {
+				continue
+			}
 			known[i].queried = true
 			queryCount++
 
@@ -254,11 +328,14 @@ func (node *KadeNode) NodeLookup(target_id uint32) [k_Size]string {
 				if err == nil {
 					resultMapMu.Lock()
 					for _, resultAddr := range remoteResult {
-						if resultAddr != "" {
+						if resultAddr != "" && !node.isBlacklisted(resultAddr) {
 							resultMap[resultAddr] = struct{}{}
 						}
 					}
 					resultMapMu.Unlock()
+				} else {
+					// Blacklist this node for this lookup
+					node.addToBlacklist(addr)
 				}
 			}(known[i].addr)
 		}
@@ -272,6 +349,9 @@ func (node *KadeNode) NodeLookup(target_id uint32) [k_Size]string {
 
 		changed := false
 		for addr := range resultMap {
+			if node.isBlacklisted(addr) {
+				continue
+			}
 			id := toID(addr)
 			dis := id ^ target_id
 
@@ -305,7 +385,9 @@ func (node *KadeNode) NodeLookup(target_id uint32) [k_Size]string {
 
 	var result [k_Size]string
 	for i, c := range known {
-		result[i] = c.addr
+		if !node.isBlacklisted(c.addr) {
+			result[i] = c.addr
+		}
 	}
 	return result
 }
@@ -357,24 +439,24 @@ func (node *KadeNode) LocalPut(entry struct {
 	defer node.datalock.Unlock()
 	existing, exists := node.data[entry.Key]
 
-	// Only update if the new entry is newer.
-	if !exists || entry.Value.Timestamp.After(existing.Timestamp) {
-		// Do not store tombstone if there is no existing value.
-		if entry.Value.IsTomb && !exists {
-			*reply = false
-			return nil
-		}
+	// Accept the change as long as the incoming timestamp is newer or the same.
+	if !exists || !entry.Value.Timestamp.Before(existing.Timestamp) {
 		node.data[entry.Key] = StoredData{
 			CoreData:      entry.Value,
-			LastRefreshed: time.Now(), // Mark as refreshed now.
+			LastRefreshed: time.Now(),
 		}
+		logrus.Infof("[%s] Accepted value for key %s (tombstone=%v, ts=%v)", node.Addr, entry.Key, entry.Value.IsTomb, entry.Value.Timestamp)
 		*reply = true
-	} else {
-		*reply = false
+		return nil
 	}
+	logrus.Infof("[%s] Ignored value for key %s (incoming ts=%v, existing ts=%v)", node.Addr, entry.Key, entry.Value.Timestamp, existing.Timestamp)
+	*reply = false
 	return nil
 }
 
+//Old methods, use the new Retry version instead
+
+/*
 func (node *KadeNode) Get(key string) (bool, string) {
 	candidates := node.NodeLookup(toID(key))
 
@@ -432,7 +514,6 @@ func (node *KadeNode) Publish(key string, value CoreData) bool {
 	candidates := node.NodeLookup(toID(key))
 
 	var succCnt atomic.Int32
-	var failCnt atomic.Int32
 	var wg sync.WaitGroup
 	for _, addr := range candidates {
 		if addr == "" {
@@ -446,17 +527,180 @@ func (node *KadeNode) Publish(key string, value CoreData) bool {
 				Key   string
 				Value CoreData
 			}{Key: key, Value: value}, &reply)
-
-			if err == nil && reply {
-				succCnt.Add(1)
-			} else {
-				failCnt.Add(1)
+			if err == nil {
+				if reply {
+					succCnt.Add(1)
+				}
 			}
 		}(addr)
 	}
 	wg.Wait()
 
-	return succCnt.Load() > failCnt.Load()
+	return succCnt.Load() >= k_Size/4
+}
+*/
+
+// policy, same as chord
+const (
+	// --- New constants for retry logic ---
+	maxRetryCount    = 2
+	initialRetryWait = 100 * time.Millisecond
+	maxRetryWait     = 1 * time.Second
+)
+
+// exponentialBackoff waits for an exponentially increasing duration, capped at maxRetryWait.
+func exponentialBackoff(attempt int) time.Duration {
+	wait := initialRetryWait * (1 << attempt)
+	if wait > maxRetryWait {
+		return maxRetryWait
+	}
+	return wait
+}
+
+func (node *KadeNode) getSingleShot(key string) (found bool, value string, isTombstone bool, err error) {
+	candidates := node.NodeLookup(toID(key))
+
+	var newest CoreData
+	var hasResult bool
+	var resultMu sync.Mutex
+	var wg sync.WaitGroup
+
+	for _, addr := range candidates {
+		if addr == "" {
+			continue
+		}
+		wg.Add(1)
+		go func(addr string) {
+			defer wg.Done()
+			var reply struct {
+				Found bool
+				Value CoreData
+			}
+			rpcErr := node.RemoteCall(addr, "KadeNode.LocalGet", key, &reply)
+			if rpcErr == nil && reply.Found {
+				resultMu.Lock()
+				defer resultMu.Unlock()
+				if !hasResult || reply.Value.Timestamp.After(newest.Timestamp) {
+					newest = reply.Value
+					hasResult = true
+				}
+			}
+		}(addr)
+	}
+	wg.Wait()
+
+	if !hasResult {
+		// No node returned a value. This is a transient failure.
+		return false, "", false, errors.New("no responsive nodes returned a value")
+	}
+
+	return true, newest.Value, newest.IsTomb, nil
+}
+
+// publishSingleShot attempts to publish data to the k-closest nodes once.
+// It returns true with a nil error if the quorum was met.
+// It returns false with a non-nil error if the quorum was not met and should be retried.
+func (node *KadeNode) publishSingleShot(key string, value CoreData) (bool, error) {
+	candidates := node.NodeLookup(toID(key))
+
+	var succCnt atomic.Int32
+	var totalCnt int32
+	var wg sync.WaitGroup
+	for _, addr := range candidates {
+		if addr == "" {
+			continue
+		}
+		totalCnt++
+		wg.Add(1)
+		go func(addr string) {
+			defer wg.Done()
+			var reply bool
+			err := node.RemoteCall(addr, "KadeNode.LocalPut", struct {
+				Key   string
+				Value CoreData
+			}{Key: key, Value: value}, &reply)
+			if err == nil && reply {
+				succCnt.Add(1)
+			}
+		}(addr)
+	}
+	wg.Wait()
+
+	successes := succCnt.Load()
+	if successes >= k_Size/2 || (totalCnt > 0 && successes == totalCnt) {
+		return true, nil
+	}
+	var failedCandidates []string
+	for _, addr := range candidates {
+		if addr != "" {
+			failedCandidates = append(failedCandidates, addr)
+		}
+	}
+	return false, errors.New(
+		"publish quorum not met: total candidates=" + strconv.Itoa(int(totalCnt)) +
+			", successes=" + strconv.Itoa(int(successes)) +
+			", candidates=" + fmt.Sprintf("%v", failedCandidates),
+	)
+}
+
+func (node *KadeNode) Get(key string) (bool, string) {
+	for attempt := 0; attempt < maxRetryCount; attempt++ {
+		found, val, isTomb, err := node.getSingleShot(key)
+		if err == nil {
+			// Definitive result: if it's a tombstone, it's not "found".
+			if isTomb {
+				return false, ""
+			}
+			return found, val
+		}
+		// Transient error, wait and retry.
+		logrus.Warnf("[%s] Get attempt %d for key '%s' failed, retrying: %v", node.Addr, attempt+1, key, err)
+		time.Sleep(exponentialBackoff(attempt))
+	}
+	return false, ""
+}
+
+func (node *KadeNode) Put(key string, value string) bool {
+	return node.Publish(key, CoreData{
+		Value:     value,
+		IsTomb:    false,
+		Timestamp: time.Now(),
+	})
+}
+
+func (node *KadeNode) Delete(key string) bool {
+	// 1. Check if the key exists and is not already a tombstone.
+	// The Get method correctly handles retries and checks for tombstones.
+	found, _ := node.Get(key)
+	if !found {
+		// Nothing to delete, or it's already a tombstone.
+		// Return false to indicate no meaningful state change occurred.
+		logrus.Infof("[%s] Delete for key '%s' found no existing value. Operation aborted.", node.Addr, key)
+		return false
+	}
+
+	// 2. The key exists, so now we publish a tombstone.
+	// The timestamp must be fresh to ensure it overwrites the existing value.
+	logrus.Infof("[%s] Delete for key '%s' found existing value. Publishing tombstone.", node.Addr, key)
+	return node.Publish(key, CoreData{
+		IsTomb:    true,
+		Timestamp: time.Now(),
+	})
+}
+
+func (node *KadeNode) Publish(key string, value CoreData) bool {
+	for attempt := 0; attempt < maxRetryCount; attempt++ {
+		success, err := node.publishSingleShot(key, value)
+		if err == nil {
+			// Definitive result from the single shot.
+			return success
+		}
+		// Transient error, wait and retry.
+		logrus.Warnf("[%s] Publish attempt %d for key '%s' failed, retrying: %v", node.Addr, attempt+1, key, err)
+		time.Sleep(exponentialBackoff(attempt))
+	}
+	logrus.Errorf("[%s] Publish for key '%s' failed after %d attempts.", node.Addr, key, maxRetryCount)
+	return false
 }
 
 //--------------Background Task----------------
@@ -489,6 +733,7 @@ func (node *KadeNode) MaintainData() {
 	for key, storeData := range node.data {
 		if time.Since(storeData.LastRefreshed) > dataStaleAfter {
 			delete(node.data, key)
+			logrus.Infof("Removed stale data for key '%s'", key)
 		}
 	}
 	node.datalock.Unlock()
@@ -497,11 +742,10 @@ func (node *KadeNode) MaintainData() {
 func (node *KadeNode) MaintainBucket() {
 	now := time.Now()
 	for i := 0; i < digitLength; i++ {
-		if now.Sub(node.BucktUpdateTime[i]) > 2*bucketUpdateInterval {
+		if now.Sub(node.BucketUpdateTime[i]) > bucketUpdateInterval {
 			// Refresh the bucket by performing a lookup for a random ID in the bucket's range
 			randomID := node.ID ^ (1 << i) ^ uint32(node.randGen.Intn(1<<i))
 			node.NodeLookup(randomID)
-			return
 		}
 	}
 }
@@ -509,8 +753,10 @@ func (node *KadeNode) MaintainBucket() {
 func (node *KadeNode) Run(wg *sync.WaitGroup) {
 	node.isActive = true
 	go func() {
-		tickerData := time.NewTicker(republishInterval)
-		tickerBucket := time.NewTicker(bucketUpdateInterval)
+		// Add a random ~500ms difference between the tickers to avoid overlap across nodes
+		randDiff := time.Duration(node.randGen.Intn(500)) * time.Millisecond
+		tickerData := time.NewTicker(republishInterval + randDiff)
+		tickerBucket := time.NewTicker(bucketUpdateInterval + randDiff)
 		defer tickerData.Stop()
 		defer tickerBucket.Stop()
 		for {
@@ -533,9 +779,85 @@ func (node *KadeNode) Quit() {
 	if !node.isActive {
 		return
 	}
+
 	node.isActive = false
+
 	close(node.shutdown)
+
+	//Maintain connectivity & strengthen connection
+	logrus.Infof("[%s] introduce neighbors to each other", node.Addr)
+	var neighbors [k_Size]string
+
+	node.askForIDInternal(node.ID, &neighbors) // get close nodes
+	cleanNeighbor := make([]string, 0, k_Size)
+	for _, addr := range neighbors {
+		if addr != "" && addr != node.Addr {
+			cleanNeighbor = append(cleanNeighbor, addr)
+		}
+	}
+	node.randGen.Shuffle(len(cleanNeighbor), func(i, j int) {
+		cleanNeighbor[i], cleanNeighbor[j] = cleanNeighbor[j], cleanNeighbor[i]
+	})
+	if len(cleanNeighbor) > 1 {
+		var wg sync.WaitGroup
+		numHeirs := len(cleanNeighbor)
+		for i := 0; i < numHeirs; i++ {
+			//introduce one to the next to form a ring
+			first := cleanNeighbor[i]
+			second := cleanNeighbor[(i+1)%numHeirs]
+			wg.Add(1)
+			go func(target string, introducee string) {
+				defer wg.Done()
+				node.MiniNode.RemoteCall(target, "KadeNode.NotifyUpdate", introducee, nil)
+				node.MiniNode.RemoteCall(introducee, "KadeNode.NotifyUpdate", target, nil)
+			}(first, second)
+		}
+		wg.Wait()
+	}
+	logrus.Infof("[%s] Finished pairwise introductions.", node.Addr)
+
+	// --- Start of New "Goodbye" Logic ---
+	logrus.Infof("[%s] Broadcasting leave notification to all known contacts...", node.Addr)
+
+	// Collect all unique contacts from k-buckets
+	allContacts := make(map[string]struct{})
+	node.mu.Lock()
+	for i := 0; i < digitLength; i++ {
+		for j := 0; j < k_Size; j++ {
+			addr := node.k_Bucket[i][j]
+			if addr != "" {
+				allContacts[addr] = struct{}{}
+			}
+		}
+	}
+	node.mu.Unlock()
+
+	// Send notifications in parallel
+	var wg sync.WaitGroup
+	for addr := range allContacts {
+		wg.Add(1)
+		go func(peerAddr string) {
+			defer wg.Done()
+			node.RemoteCall(peerAddr, "KadeNode.NotifyLeave", node.Addr, nil)
+		}(addr)
+	}
+	wg.Wait() // Wait for all notifications to be sent.
+	logrus.Infof("[%s] Finished broadcasting leave notifications.", node.Addr)
+
+	// Republish all data in parallel before leaving
+	var wgRepublish sync.WaitGroup
+	for key, storeData := range node.data {
+		wgRepublish.Add(1)
+		go func(key string, core CoreData) {
+			defer wgRepublish.Done()
+			node.Publish(key, core)
+		}(key, storeData.CoreData)
+	}
+	wgRepublish.Wait()
+
+	node.MiniNode.Shutdown()
 	node.MiniNode.Quit()
+	logrus.Infof("Quit Finished")
 }
 
 func (node *KadeNode) ForceQuit() {
@@ -550,8 +872,19 @@ func (node *KadeNode) ForceQuit() {
 func (node *KadeNode) GetDebugState() string {
 	node.mu.Lock()
 	defer node.mu.Unlock()
-	state := "K-Buckets:\n"
+	state := fmt.Sprintf("Node: %s (ID: %d)\nK-Buckets:\n", node.Addr, node.ID)
 	for i := 0; i < digitLength; i++ {
+		// Check if the bucket has any non-empty entries
+		nonEmpty := false
+		for j := 0; j < k_Size; j++ {
+			if node.k_Bucket[i][j] != "" {
+				nonEmpty = true
+				break
+			}
+		}
+		if !nonEmpty {
+			continue
+		}
 		state += "[" + strconv.Itoa(i) + "] "
 		for j := 0; j < k_Size; j++ {
 			if node.k_Bucket[i][j] != "" {
