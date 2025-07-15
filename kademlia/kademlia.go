@@ -20,9 +20,9 @@ const (
 	digitLength          = 32
 	k_Size               = 8
 	trySize              = 4
-	republishInterval    = 4 * time.Second
-	bucketUpdateInterval = 4 * time.Second
-	dataStaleAfter       = 20 * time.Second
+	republishInterval    = 2 * time.Second
+	bucketUpdateInterval = 2 * time.Second
+	dataStaleAfter       = 10 * time.Second
 )
 
 func toID(addr string) uint32 {
@@ -543,7 +543,7 @@ func (node *KadeNode) Publish(key string, value CoreData) bool {
 // policy, same as chord
 const (
 	// --- New constants for retry logic ---
-	maxRetryCount    = 2
+	maxRetryCount    = 3
 	initialRetryWait = 100 * time.Millisecond
 	maxRetryWait     = 1 * time.Second
 )
@@ -815,8 +815,6 @@ func (node *KadeNode) Quit() {
 		wg.Wait()
 	}
 	logrus.Infof("[%s] Finished pairwise introductions.", node.Addr)
-
-	// --- Start of New "Goodbye" Logic ---
 	logrus.Infof("[%s] Broadcasting leave notification to all known contacts...", node.Addr)
 
 	// Collect all unique contacts from k-buckets
