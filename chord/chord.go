@@ -462,8 +462,8 @@ func (node *ChordNode) LocalPut(args []string, reply *bool) error {
 }
 
 func (node *ChordNode) LocalDelete(key string, reply *bool) error {
+	// Step 1: Delete the key from the local data store.
 	node.datalock.Lock()
-	defer node.datalock.Unlock()
 	_, exists := node.data[key]
 	if exists {
 		delete(node.data, key)
@@ -471,9 +471,55 @@ func (node *ChordNode) LocalDelete(key string, reply *bool) error {
 	} else {
 		*reply = false
 	}
+	node.datalock.Unlock() // Unlock before making network calls.
+
+	// If the key didn't exist here, there's nothing to replicate, so we're done.
+	if !*reply {
+		return nil
+	}
+
+	// Step 2: If the local delete was successful, propagate the delete to replicas.
+	// This logic is "fire-and-forget" for performance and resilience.
+	node.mu.Lock()
+	// Collect the addresses of the successors that hold replicas.
+	succs := make([]string, 0, ReplicaCount-1)
+	for _, addr := range node.successorList {
+		if addr != "" && addr != node.Addr {
+			succs = append(succs, addr)
+			if len(succs) >= ReplicaCount-1 {
+				break
+			}
+		}
+	}
+	node.mu.Unlock()
+
+	// Asynchronously call DeleteReplica on each successor.
+	for _, succAddr := range succs {
+		go func(addr string) {
+			// We don't need to check the result. If the call fails,
+			// the stale replica will eventually be removed by ClearExpired.
+			node.RemoteCall(addr, "ChordNode.DeleteReplica", key, new(bool))
+		}(succAddr)
+	}
+
 	return nil
 }
+// DeleteReplica is an RPC method called by a primary node on its successors
+// to instruct them to delete a replicated key.
+func (node *ChordNode) DeleteReplica(key string, reply *bool) error {
+	node.datalock.Lock()
+	defer node.datalock.Unlock()
 
+	_, exists := node.data[key]
+	if exists {
+		delete(node.data, key)
+		*reply = true
+	} else {
+		// It's okay if the replica doesn't exist; the goal is for it to be gone.
+		*reply = true 
+	}
+	return nil
+}
 // getSingleShot attempts to get a value once.
 // Returns (found, value, nil) on a definitive outcome.
 // Returns (false, "", error) on a transient/retryable failure.
