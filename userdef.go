@@ -13,7 +13,7 @@ import (
  */
 
 func NewNode(port int) dhtNode {
-	return NewNodeChord(port)
+	return NewNodeKade(port)
 }
 
 func NewNodeKade(port int) dhtNode {
