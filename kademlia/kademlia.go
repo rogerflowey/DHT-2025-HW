@@ -20,9 +20,9 @@ const (
 	digitLength          = 32
 	k_Size               = 8
 	trySize              = 4
-	republishInterval    = 2 * time.Second
-	bucketUpdateInterval = 2 * time.Second
-	dataStaleAfter       = 10 * time.Second
+	republishInterval    = 4 * time.Second
+	bucketUpdateInterval = 4 * time.Second
+	dataStaleAfter       = 20 * time.Second
 )
 
 func toID(addr string) uint32 {
